@@ -63,8 +63,8 @@ if prog_file and comm_file:
     # 總應領佣金加總
     raw_comm_total = pd.to_numeric(df_comm["應領佣金"], errors='coerce').sum()
     
-    # 總所得稅金：5% 且無條件進位 (math.ceil)
-    total_income_tax = math.ceil(raw_comm_total * 0.05)
+    # 【關鍵修正】：總所得稅金改為 10% 且無條件進位
+    total_income_tax = math.ceil(raw_comm_total * 0.10)
 
     for i, c_row in df_comm.iterrows():
         c_name = str(c_row.get("被保險人", c_row.get("被保險人姓名", ""))).strip()
@@ -106,8 +106,7 @@ if prog_file and comm_file:
                 elif "責任" in ins_desc:
                     calc_comm = premium * RATES["產品責任險"]
 
-                # 【關鍵修正】：應付佣金採「無條件捨去」(math.floor)
-                # 例如 21.6 元會變成 21 元
+                # 應付佣金採「無條件捨去」
                 final_comm = math.floor(calc_comm)
 
                 results.append({
@@ -129,7 +128,7 @@ if prog_file and comm_file:
         st.divider()
         st.subheader("📊 結算數據統計")
         m1, m2, m3 = st.columns(3)
-        m1.metric("📌 總所得稅金 (5% 進位)", f"${int(total_income_tax):,}")
+        m1.metric("📌 總所得稅金 (10% 進位)", f"${int(total_income_tax):,}")
         m2.metric("🏦 留凱基 (捨去後佣金總額)", f"${int(total_calc_comm):,}")
         m3.metric("🏦 匯國泰", f"${int(remit_cathay):,}")
         
@@ -139,7 +138,7 @@ if prog_file and comm_file:
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             res_df.to_excel(writer, index=False, sheet_name='佣金明細')
             pd.DataFrame([{
-                "總所得稅金(進位)": total_income_tax, 
+                "總所得稅金(10%進位)": total_income_tax, 
                 "留凱基合計(捨去)": total_calc_comm, 
                 "匯國泰合計": remit_cathay
             }]).to_excel(writer, index=False, sheet_name='統計摘要')
