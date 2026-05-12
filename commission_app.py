@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import io
-import math  # 用於處理無條件進位
+import math  # 用於處理進位(ceil)與捨去(floor)
 from datetime import datetime
 
 # --- 1. 系統設定 ---
@@ -60,10 +60,10 @@ if prog_file and comm_file:
 
     # --- 5. 核心運算邏輯 ---
     results = []
-    # 總應領佣金加總（用於計算匯國泰金額）
+    # 總應領佣金加總
     raw_comm_total = pd.to_numeric(df_comm["應領佣金"], errors='coerce').sum()
     
-    # 總所得稅金：5% 且小數點第一位無條件進位 (例如 87.1 -> 88)
+    # 總所得稅金：5% 且無條件進位 (math.ceil)
     total_income_tax = math.ceil(raw_comm_total * 0.05)
 
     for i, c_row in df_comm.iterrows():
@@ -83,11 +83,10 @@ if prog_file and comm_file:
             p_row = match.iloc[0]
             servicer = str(p_row.get("實際服務人員", "")).strip()
             
-            # 【關鍵修改】：如果服務人員是「謝騏鴻」，直接忽略不計
+            # 過濾「謝騏鴻」
             if servicer == "謝騏鴻":
                 continue
             
-            # 只有非謝騏鴻且有服務人員名稱的才計算
             if servicer:
                 plate = p_row.get("牌照號碼", "")
                 premium = pd.to_numeric(c_row.get("實收保費", 0), errors='coerce')
@@ -107,13 +106,17 @@ if prog_file and comm_file:
                 elif "責任" in ins_desc:
                     calc_comm = premium * RATES["產品責任險"]
 
+                # 【關鍵修正】：應付佣金採「無條件捨去」(math.floor)
+                # 例如 21.6 元會變成 21 元
+                final_comm = math.floor(calc_comm)
+
                 results.append({
                     "製表日期": datetime.now().strftime("%Y-%m-%d"),
                     "被保險人姓名": c_name,
                     "保單號碼": c_p_no,
                     "車牌號碼": plate,
                     "實收保費": premium,
-                    "應付佣金": round(calc_comm, 0),
+                    "應付佣金": final_comm,
                     "實際服務人員": servicer
                 })
 
@@ -127,7 +130,7 @@ if prog_file and comm_file:
         st.subheader("📊 結算數據統計")
         m1, m2, m3 = st.columns(3)
         m1.metric("📌 總所得稅金 (5% 進位)", f"${int(total_income_tax):,}")
-        m2.metric("🏦 留凱基 (應付佣金總額)", f"${int(total_calc_comm):,}")
+        m2.metric("🏦 留凱基 (捨去後佣金總額)", f"${int(total_calc_comm):,}")
         m3.metric("🏦 匯國泰", f"${int(remit_cathay):,}")
         
         st.dataframe(res_df, use_container_width=True)
@@ -137,9 +140,9 @@ if prog_file and comm_file:
             res_df.to_excel(writer, index=False, sheet_name='佣金明細')
             pd.DataFrame([{
                 "總所得稅金(進位)": total_income_tax, 
-                "留凱基合計": total_calc_comm, 
+                "留凱基合計(捨去)": total_calc_comm, 
                 "匯國泰合計": remit_cathay
             }]).to_excel(writer, index=False, sheet_name='統計摘要')
         st.download_button(label="📥 下載結算報表", data=output.getvalue(), file_name="佣金結算單.xlsx")
     else:
-        st.warning("⚠️ 查無符合條件的資料（可能已被篩選過濾）。")
+        st.warning("⚠️ 查無符合條件的資料。")
