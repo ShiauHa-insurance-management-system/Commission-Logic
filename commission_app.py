@@ -23,11 +23,11 @@ if not st.session_state.auth:
 # --- 3. 險種參數管理 ---
 st.sidebar.title("⚙️ 參數設定中心")
 
-# 預設參數內容
+# 預設參數內容（完全比照你的設定檔）
 default_rates = {
-    "險種名稱": ["機車強制險", "汽車強制險", "車險任意險", "住火險", "旅平險", "產品責任險"],
-    "佣金趴數或金額": [30.0, 60.0, 0.07, 0.03, 0.10, 0.10],
-    "計算類型": ["固定金額", "固定金額", "百分比", "百分比", "百分比", "百分比"]
+    "險種名稱": ["車險任意險", "住火險", "旅平險", "產品責任險", "公共意外責任險", "商火險", "個人意外險", "機車強制險", "汽車強制險"],
+    "佣金趴數或金額": [0.08, 0.05, 0.10, 0.10, 0.10, 0.08, 0.10, 30.0, 60.0],
+    "計算類型": ["百分比", "百分比", "百分比", "百分比", "百分比", "百分比", "百分比", "固定金額", "固定金額"]
 }
 
 config_file = st.sidebar.file_uploader("📂 載入參數設定檔 (.xlsx)", type="xlsx")
@@ -54,7 +54,7 @@ st.sidebar.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-# 轉換成字典
+# 轉換成方便程式讀取的字典
 current_rates = {}
 for _, row in edited_df.iterrows():
     name_key = str(row["險種名稱"]).strip()
@@ -80,10 +80,11 @@ with col2:
 if prog_file and comm_file:
     df_prog = pd.read_excel(prog_file).fillna("")
     df_prog = clean_cols(df_prog)
+    
+    # 佣金明細表標題在第 3 行 (索引 2)
     df_comm = pd.read_excel(comm_file, header=2).fillna("")
     df_comm = clean_cols(df_comm)
 
-    # 智慧相容檢查：只要有「應領佣金」即可
     if "應領佣金" not in df_comm.columns:
         st.error("❌ 佣金表標題定位失敗。請確認欄位是否包含『應領佣金』。")
         st.stop()
@@ -91,17 +92,18 @@ if prog_file and comm_file:
     # --- 5. 核心運算邏輯 ---
     results = []
     raw_comm_total = pd.to_numeric(df_comm["應領佣金"], errors='coerce').sum()
-    total_income_tax = math.ceil(raw_comm_total * 0.10) # 所得稅 10% 進位
+    total_income_tax = math.ceil(raw_comm_total * 0.10) # 總所得稅 10% 且無條件進位
 
     for i, c_row in df_comm.iterrows():
-        # 【智慧支援】：同時抓取多種可能的欄位名稱
+        # 【去空格處理】：防範看不見的尾碼空白
         c_name = str(c_row.get("被保險人姓名", c_row.get("被保險人", c_row.get("姓名", "")))).strip()
         c_p_no = str(c_row.get("新年度保單號碼", c_row.get("保單號碼", ""))).strip()
         
         if not c_name or c_name == "nan" or "備註" in c_name or c_name == "": continue
         if not c_p_no or c_p_no == "nan" or c_p_no == "": continue
 
-        # 進行雙表交叉比對
+        # --- 交叉智慧比對 ---
+        # 1. 優先精確比對 (姓名與保單號碼完全相同)
         match = df_prog[
             ((df_prog.get("被保險人姓名", pd.Series()).astype(str).str.strip() == c_name) |
              (df_prog.get("被保險人", pd.Series()).astype(str).str.strip() == c_name)) &
@@ -109,49 +111,68 @@ if prog_file and comm_file:
              (df_prog.get("保單號碼", pd.Series()).astype(str).str.strip() == c_p_no))
         ]
         
+        # 2. 【智慧模糊比對機制】：如果精確比對失敗 (針對進度表沒登記強制險號碼的問題)
+        if match.empty and len(c_p_no) >= 6:
+            c_p_prefix = c_p_no[:6] # 抓取保單前6碼 (通常是批號，如 188826)
+            
+            # 使用姓名且進度表保單號碼「包含」前置碼來進行模糊比對
+            match = df_prog[
+                ((df_prog.get("被保險人姓名", pd.Series()).astype(str).str.strip() == c_name) |
+                 (df_prog.get("被保險人", pd.Series()).astype(str).str.strip() == c_name)) &
+                ((df_prog.get("新年度保單號碼", pd.Series()).astype(str).str.strip().str.contains(c_p_prefix)) |
+                 (df_prog.get("保單號碼", pd.Series()).astype(str).str.strip().str.contains(c_p_prefix)))
+            ]
+        
+        # 如果找到相符客戶的出單進度紀錄
         if not match.empty:
             p_row = match.iloc[0]
             servicer = str(p_row.get("實際服務人員", p_row.get("服務人員", ""))).strip()
             
-            if servicer == "謝騏鴻": continue # 遇謝騏鴻自動跳過
+            # 遇到「謝騏鴻」一律過濾跳過
+            if servicer == "謝騏鴻": continue 
             
             if servicer:
                 premium = pd.to_numeric(c_row.get("實收保費", 0), errors='coerce')
-                # 合併所有可能的險種資訊，擴大偵測面
-                ins_desc = str(c_row.get("險種", "")) + str(c_row.get("保件種類", "")) + str(p_row.get("保險種類", ""))
+                ins_desc = str(c_row.get("險種", "")).strip()
                 
                 calc_comm = 0
                 matched_flag = False
                 
-                # 1. 優先攔截：機車強制險 (包含"機車"且"強制"，或者完全匹配參數名稱)
-                if ("機車" in ins_desc and "強制" in ins_desc) or "機車強制" in ins_desc:
+                # --- 【險種判定獨立分流，互不干涉】 ---
+                # A. 機車強制險判定 (文字包含機車+強制)
+                if "機車" in ins_desc and "強制" in ins_desc:
                     cfg_key = next((k for k in current_rates if "機車" in k and "強制" in k), "機車強制險")
                     if cfg_key in current_rates:
                         config = current_rates[cfg_key]
                         calc_comm = premium * config["val"] if config["type"] == "百分比" else config["val"]
                         matched_flag = True
 
-                # 2. 次級攔截：汽車強制險
-                elif ("汽車" in ins_desc and "強制" in ins_desc) or "汽車強制" in ins_desc:
+                # B. 汽車強制險判定 (文字包含汽車+強制)
+                elif "汽車" in ins_desc and "強制" in ins_desc:
                     cfg_key = next((k for k in current_rates if "汽車" in k and "強制" in k), "汽車強制險")
                     if cfg_key in current_rates:
                         config = current_rates[cfg_key]
                         calc_comm = premium * config["val"] if config["type"] == "百分比" else config["val"]
                         matched_flag = True
 
-                # 3. 常規險種比對（按字數從長到短）
+                # C. 其他所有常規險種比對 (任意險、住火、旅平...)
                 if not matched_flag:
+                    # 依據關鍵字字數由長到短排序比對
                     sorted_keys = sorted(current_rates.keys(), key=len, reverse=True)
                     for target_name in sorted_keys:
-                        if "強制" in target_name: continue # 跳過前面處理過的
+                        if "強制" in target_name: continue # 跳過前面處理過的強制險
                         
+                        # 如果險種欄位完全包含該參數名稱，或者包含特殊車險任意險代碼
                         if target_name in ins_desc or (target_name == "車險任意險" and any(k in ins_desc for k in ["任意", "CTA", "QTHO"])):
                             config = current_rates[target_name]
                             calc_comm = premium * config["val"] if config["type"] == "百分比" else config["val"]
                             matched_flag = True
                             break
+                
+                if not matched_flag:
+                    calc_comm = 0
 
-                final_comm = math.floor(calc_comm) # 應付佣金無條件捨去
+                final_comm = math.floor(calc_comm) # 應付佣金無條件捨去取整數
 
                 results.append({
                     "製表日期": datetime.now().strftime("%Y-%m-%d"),
@@ -188,4 +209,4 @@ if prog_file and comm_file:
             }]).to_excel(writer, index=False, sheet_name='統計摘要')
         st.download_button(label="📥 下載結算報表", data=output_res.getvalue(), file_name="佣金結算單.xlsx")
     else:
-        st.warning("⚠️ 比對完成，但查無符合條件的資料。請確認兩邊表格的「姓名」與「保單號碼」是否一致。")
+        st.warning("⚠️ 比對完成，但查無符合條件的資料。請確認兩邊表格是否有對應的客戶紀錄。")
