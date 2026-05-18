@@ -23,11 +23,11 @@ if not st.session_state.auth:
 # --- 3. 險種參數管理 ---
 st.sidebar.title("⚙️ 參數設定中心")
 
-# 預設參數內容
+# 【關鍵修正】：預設參數直接將機車強制與汽車強制都設為固定金額（30元/60元）
 default_rates = {
     "險種名稱": ["機車強制險", "汽車強制險", "車險任意險", "住火險", "旅平險", "產品責任險"],
-    "佣金趴數或金額": [0.04, 60.0, 0.07, 0.03, 0.10, 0.10],
-    "計算類型": ["百分比", "固定金額", "百分比", "百分比", "百分比", "百分比"]
+    "佣金趴數或金額": [30.0, 60.0, 0.07, 0.03, 0.10, 0.10],
+    "計算類型": ["固定金額", "固定金額", "百分比", "百分比", "百分比", "百分比"]
 }
 
 config_file = st.sidebar.file_uploader("📂 載入參數設定檔 (.xlsx)", type="xlsx")
@@ -54,13 +54,13 @@ st.sidebar.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-# 轉換成字典（不排序，改用核心邏輯精確攔截）
+# 轉換成字典
 current_rates = {}
 for _, row in edited_df.iterrows():
     name_key = str(row["險種名稱"]).strip()
     current_rates[name_key] = {
-        "val": row["佣金趴數或金額"],
-        "type": row["計算類型"]
+        "val": float(row["佣金趴數或金額"]),
+        "type": str(row["計算類型"]).strip()
     }
 
 # --- 4. 主介面：上傳資料 ---
@@ -112,23 +112,22 @@ if prog_file and comm_file:
             
             if servicer:
                 premium = pd.to_numeric(c_row.get("實收保費", 0), errors='coerce')
-                # 合併所有險種相關的文字描述欄位
                 ins_desc = str(c_row.get("險種", "")) + str(c_row.get("保件種類", "")) + str(p_row.get("保險種類", ""))
                 
                 calc_comm = 0
                 matched_flag = False
                 
-                # --- 【終極防呆判定核心】 ---
-                # 優先封鎖：機車強制險
+                # --- 【全新重構：獨立判定區，絕不連鎖洗白】 ---
+                
+                # 1. 第一優先：機車強制
                 if "機車" in ins_desc and "強制" in ins_desc:
-                    # 尋找參數設定裡包含「機車」和「強制」的設定項
                     cfg_key = next((k for k in current_rates if "機車" in k and "強制" in k), None)
                     if cfg_key:
                         config = current_rates[cfg_key]
                         calc_comm = premium * config["val"] if config["type"] == "百分比" else config["val"]
                         matched_flag = True
 
-                # 優先封鎖：汽車強制險
+                # 2. 第二優先：汽車強制
                 elif "汽車" in ins_desc and "強制" in ins_desc:
                     cfg_key = next((k for k in current_rates if "汽車" in k and "強制" in k), None)
                     if cfg_key:
@@ -136,24 +135,23 @@ if prog_file and comm_file:
                         calc_comm = premium * config["val"] if config["type"] == "百分比" else config["val"]
                         matched_flag = True
 
-                # 若不是強制險，才走一般的自訂參數關鍵字比對
+                # 3. 第三優先：其餘自訂險種比對（任意險、住火、旅平...）
                 if not matched_flag:
-                    # 按照字數長短檢查其餘險種（任意險、住火、旅平...）
                     sorted_keys = sorted(current_rates.keys(), key=len, reverse=True)
                     for target_name in sorted_keys:
-                        # 排除掉前面已經處理過的強制險關鍵字
-                        if "強制" in target_name: continue
+                        # 跳過已經處理完的強制險
+                        if "強制" in target_name: 
+                            continue
                         
+                        # 檢查關鍵字是否符合
                         if target_name in ins_desc or (target_name == "車險任意險" and any(k in ins_desc for k in ["任意", "CTA", "QTHO"])):
                             config = current_rates[target_name]
                             calc_comm = premium * config["val"] if config["type"] == "百分比" else config["val"]
                             matched_flag = True
                             break
-                
-                if not matched_flag:
-                    calc_comm = 0
 
-                final_comm = math.floor(calc_comm) # 應付佣金無條件捨去
+                # 確保無條件捨去取整數
+                final_comm = math.floor(calc_comm)
 
                 results.append({
                     "製表日期": datetime.now().strftime("%Y-%m-%d"),
