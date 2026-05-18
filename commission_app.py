@@ -23,7 +23,7 @@ if not st.session_state.auth:
 # --- 3. 險種參數管理 ---
 st.sidebar.title("⚙️ 參數設定中心")
 
-# 【關鍵修正】：預設參數直接將機車強制與汽車強制都設為固定金額（30元/60元）
+# 預設參數內容
 default_rates = {
     "險種名稱": ["機車強制險", "汽車強制險", "車險任意險", "住火險", "旅平險", "產品責任險"],
     "佣金趴數或金額": [30.0, 60.0, 0.07, 0.03, 0.10, 0.10],
@@ -83,8 +83,9 @@ if prog_file and comm_file:
     df_comm = pd.read_excel(comm_file, header=2).fillna("")
     df_comm = clean_cols(df_comm)
 
+    # 智慧相容檢查：只要有「應領佣金」即可
     if "應領佣金" not in df_comm.columns:
-        st.error("❌ 佣金表標題定位失敗。")
+        st.error("❌ 佣金表標題定位失敗。請確認欄位是否包含『應領佣金』。")
         st.stop()
 
     # --- 5. 核心運算邏輯 ---
@@ -93,65 +94,64 @@ if prog_file and comm_file:
     total_income_tax = math.ceil(raw_comm_total * 0.10) # 所得稅 10% 進位
 
     for i, c_row in df_comm.iterrows():
-        c_name = str(c_row.get("被保險人", c_row.get("被保險人姓名", ""))).strip()
-        c_p_no = str(c_row.get("保單號碼", c_row.get("新年度保單號碼", ""))).strip()
+        # 【智慧支援】：同時抓取多種可能的欄位名稱
+        c_name = str(c_row.get("被保險人姓名", c_row.get("被保險人", c_row.get("姓名", "")))).strip()
+        c_p_no = str(c_row.get("新年度保單號碼", c_row.get("保單號碼", ""))).strip()
         
-        if not c_name or c_name == "nan" or "備註" in c_name: continue
+        if not c_name or c_name == "nan" or "備註" in c_name or c_name == "": continue
+        if not c_p_no or c_p_no == "nan" or c_p_no == "": continue
 
+        # 進行雙表交叉比對
         match = df_prog[
             ((df_prog.get("被保險人姓名", pd.Series()).astype(str).str.strip() == c_name) |
              (df_prog.get("被保險人", pd.Series()).astype(str).str.strip() == c_name)) &
-            (df_prog.get("新年度保單號碼", pd.Series()).astype(str).str.strip() == c_p_no)
+            ((df_prog.get("新年度保單號碼", pd.Series()).astype(str).str.strip() == c_p_no) |
+             (df_prog.get("保單號碼", pd.Series()).astype(str).str.strip() == c_p_no))
         ]
         
         if not match.empty:
             p_row = match.iloc[0]
-            servicer = str(p_row.get("實際服務人員", "")).strip()
+            servicer = str(p_row.get("實際服務人員", p_row.get("服務人員", ""))).strip()
             
-            if servicer == "謝騏鴻": continue # 過濾謝騏鴻
+            if servicer == "謝騏鴻": continue # 遇謝騏鴻自動跳過
             
             if servicer:
                 premium = pd.to_numeric(c_row.get("實收保費", 0), errors='coerce')
+                # 合併所有可能的險種資訊，擴大偵測面
                 ins_desc = str(c_row.get("險種", "")) + str(c_row.get("保件種類", "")) + str(p_row.get("保險種類", ""))
                 
                 calc_comm = 0
                 matched_flag = False
                 
-                # --- 【全新重構：獨立判定區，絕不連鎖洗白】 ---
-                
-                # 1. 第一優先：機車強制
-                if "機車" in ins_desc and "強制" in ins_desc:
-                    cfg_key = next((k for k in current_rates if "機車" in k and "強制" in k), None)
-                    if cfg_key:
+                # 1. 優先攔截：機車強制險 (包含"機車"且"強制"，或者完全匹配參數名稱)
+                if ("機車" in ins_desc and "強制" in ins_desc) or "機車強制" in ins_desc:
+                    cfg_key = next((k for k in current_rates if "機車" in k and "強制" in k), "機車強制險")
+                    if cfg_key in current_rates:
                         config = current_rates[cfg_key]
                         calc_comm = premium * config["val"] if config["type"] == "百分比" else config["val"]
                         matched_flag = True
 
-                # 2. 第二優先：汽車強制
-                elif "汽車" in ins_desc and "強制" in ins_desc:
-                    cfg_key = next((k for k in current_rates if "汽車" in k and "強制" in k), None)
-                    if cfg_key:
+                # 2. 次級攔截：汽車強制險
+                elif ("汽車" in ins_desc and "強制" in ins_desc) or "汽車強制" in ins_desc:
+                    cfg_key = next((k for k in current_rates if "汽車" in k and "強制" in k), "汽車強制險")
+                    if cfg_key in current_rates:
                         config = current_rates[cfg_key]
                         calc_comm = premium * config["val"] if config["type"] == "百分比" else config["val"]
                         matched_flag = True
 
-                # 3. 第三優先：其餘自訂險種比對（任意險、住火、旅平...）
+                # 3. 常規險種比對（按字數從長到短）
                 if not matched_flag:
                     sorted_keys = sorted(current_rates.keys(), key=len, reverse=True)
                     for target_name in sorted_keys:
-                        # 跳過已經處理完的強制險
-                        if "強制" in target_name: 
-                            continue
+                        if "強制" in target_name: continue # 跳過前面處理過的
                         
-                        # 檢查關鍵字是否符合
                         if target_name in ins_desc or (target_name == "車險任意險" and any(k in ins_desc for k in ["任意", "CTA", "QTHO"])):
                             config = current_rates[target_name]
                             calc_comm = premium * config["val"] if config["type"] == "百分比" else config["val"]
                             matched_flag = True
                             break
 
-                # 確保無條件捨去取整數
-                final_comm = math.floor(calc_comm)
+                final_comm = math.floor(calc_comm) # 應付佣金無條件捨去
 
                 results.append({
                     "製表日期": datetime.now().strftime("%Y-%m-%d"),
@@ -188,4 +188,4 @@ if prog_file and comm_file:
             }]).to_excel(writer, index=False, sheet_name='統計摘要')
         st.download_button(label="📥 下載結算報表", data=output_res.getvalue(), file_name="佣金結算單.xlsx")
     else:
-        st.warning("⚠️ 查無符合條件的資料。")
+        st.warning("⚠️ 比對完成，但查無符合條件的資料。請確認兩邊表格的「姓名」與「保單號碼」是否一致。")
