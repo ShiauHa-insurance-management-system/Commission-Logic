@@ -20,17 +20,16 @@ if not st.session_state.auth:
             else: st.error("密碼錯誤")
     st.stop()
 
-# --- 3. 險種參數管理 (核心新功能) ---
+# --- 3. 險種參數管理 ---
 st.sidebar.title("⚙️ 參數設定中心")
 
 # 預設參數內容
 default_rates = {
-    "險種名稱": ["車險任意險", "機車強制險", "汽車強制險", "住火險", "旅平險", "產品責任險"],
-    "佣金趴數或金額": [0.07, 0.04, 60.0, 0.03, 0.10, 0.10],
-    "計算類型": ["百分比", "百分比", "固定金額", "百分比", "百分比", "百分比"]
+    "險種名稱": ["機車強制險", "汽車強制險", "車險任意險", "住火險", "旅平險", "產品責任險"],
+    "佣金趴數或金額": [0.04, 60.0, 0.07, 0.03, 0.10, 0.10],
+    "計算類型": ["百分比", "固定金額", "百分比", "百分比", "百分比", "百分比"]
 }
 
-# 讓使用者可以上傳之前的設定檔
 config_file = st.sidebar.file_uploader("📂 載入參數設定檔 (.xlsx)", type="xlsx")
 
 if config_file:
@@ -40,7 +39,6 @@ else:
         st.session_state.df_rates = pd.DataFrame(default_rates)
     df_rates = st.session_state.df_rates
 
-# 顯示並編輯參數表
 st.sidebar.subheader("編輯險種與佣金")
 edited_df = st.sidebar.data_editor(df_rates, num_rows="dynamic", hide_index=True)
 st.session_state.df_rates = edited_df
@@ -56,13 +54,16 @@ st.sidebar.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-# 將設定轉換成程式可讀的 dictionary
-current_rates = {}
+# 轉換成字典，並按照「險種名稱長度」由長到短排序（避免短關鍵字先被誤攔截）
+current_rates = []
 for _, row in edited_df.iterrows():
-    current_rates[row["險種名稱"]] = {
+    current_rates.append({
+        "name": str(row["險種名稱"]).strip(),
         "val": row["佣金趴數或金額"],
         "type": row["計算類型"]
-    }
+    })
+# 排序：例如「機車強制險」(5字) 會排在「車險任意險」(5字) 或「車」(1字) 前面
+current_rates = sorted(current_rates, key=lambda x: len(x["name"]), reverse=True)
 
 # --- 4. 主介面：上傳資料 ---
 st.title("💰 佣金對帳與計算中心")
@@ -113,21 +114,33 @@ if prog_file and comm_file:
             
             if servicer:
                 premium = pd.to_numeric(c_row.get("實收保費", 0), errors='coerce')
-                ins_desc = str(c_row.get("險種", "")) + str(p_row.get("保險種類", ""))
+                # 結合佣金表與進度表的險種欄位描述
+                ins_desc = str(c_row.get("險種", "")) + str(c_row.get("保件種類", "")) + str(p_row.get("保險種類", ""))
                 
                 calc_comm = 0
-                # 根據側邊欄設定的「險種名稱」進行關鍵字比對
-                for target_name, config in current_rates.items():
-                    if target_name in ins_desc:
+                matched_flag = False
+                
+                # 特殊邏輯：如果代碼包含 CTA/QTHO 且沒對到強制險，通常為車險任意險
+                # 先跑自訂參數精確比對
+                for config in current_rates:
+                    target_name = config["name"]
+                    # 檢查參數名稱的關鍵字有沒有在 Excel 的險種描述裡
+                    if target_name in ins_desc or (target_name == "車險任意險" and any(k in ins_desc for k in ["任意", "CTA", "QTHO"])):
                         if config["type"] == "百分比":
                             calc_comm = premium * config["val"]
                         else: # 固定金額
                             calc_comm = config["val"]
-                        break # 匹配到第一個就跳出
+                        matched_flag = True
+                        break # 比對到最長的關鍵字就跳出
+                
+                # 如果完全沒對到任何參數，預設當作 0
+                if not matched_flag:
+                    calc_comm = 0
 
                 final_comm = math.floor(calc_comm) # 應付佣金無條件捨去
 
                 results.append({
+                    "製表日期": datetime.now().strftime("%Y-%m-%d"), # 【補回】：製表日期
                     "被保險人姓名": c_name,
                     "保單號碼": c_p_no,
                     "車牌號碼": p_row.get("牌照號碼", ""),
@@ -154,4 +167,11 @@ if prog_file and comm_file:
         output_res = io.BytesIO()
         with pd.ExcelWriter(output_res, engine='xlsxwriter') as writer:
             res_df.to_excel(writer, index=False, sheet_name='佣金明細')
+            pd.DataFrame([{
+                "總所得稅金(10%進位)": total_income_tax, 
+                "留凱基合計(捨去)": total_calc_comm, 
+                "匯國泰合計": remit_cathay
+            }]).to_excel(writer, index=False, sheet_name='統計摘要')
         st.download_button(label="📥 下載結算報表", data=output_res.getvalue(), file_name="佣金結算單.xlsx")
+    else:
+        st.warning("⚠️ 查無符合條件的資料。")
