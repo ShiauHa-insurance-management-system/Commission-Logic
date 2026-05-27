@@ -92,7 +92,7 @@ if prog_file and comm_file:
     # --- 5. 核心運算邏輯 ---
     results = []
     raw_comm_total = pd.to_numeric(df_comm["應領佣金"], errors='coerce').sum()
-    total_income_tax = math.ceil(raw_comm_total * 0.10) # 總所得稅 10% 且無條件進位
+    total_income_tax = math.ceil(raw_comm_total * 0.12) # 總所得稅 12% 且無條件進位
 
     for i, c_row in df_comm.iterrows():
         # 【去空格處理】：防範看不見的尾碼空白
